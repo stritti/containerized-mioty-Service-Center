@@ -14,12 +14,13 @@ The BSSCI Service Center is a comprehensive IoT device management system that pr
 5. [Sensor Management](#sensor-management)
 6. [Auto-Detach System](#auto-detach-system)
 7. [MQTT Integration](#mqtt-integration)
-8. [Web Interface](#web-interface)
-9. [API Reference](#api-reference)
-10. [Troubleshooting](#troubleshooting)
-11. [Advanced Features](#advanced-features)
-12. [OMS/Wireless M-Bus Support](#omswireless-m-bus-wmbus-meter-support)
-13. [User Authentication & Access Control](#user-authentication--role-based-access-control)
+8. [OpenTelemetry Integration](#opentelemetry-integration)
+9. [Web Interface](#web-interface)
+10. [API Reference](#api-reference)
+11. [Troubleshooting](#troubleshooting)
+12. [Advanced Features](#advanced-features)
+13. [OMS/Wireless M-Bus Support](#omswireless-m-bus-wmbus-meter-support)
+14. [User Authentication & Access Control](#user-authentication--role-based-access-control)
 
 ## System Architecture
 
@@ -571,6 +572,139 @@ OMS/wMBUS meters detected via the VM sub-channel are automatically published to 
 ```
 
 The payload follows the same structure as standard mioty sensor uplinks (`bs_eui`, `snr`, `rssi`, `data`, `mac_type`, `timestamp`) with an additional `oms` block containing the decoded wMBUS meter information.
+
+## OpenTelemetry Integration
+
+The BSSCI Service Center ships with an optional [OpenTelemetry Collector](https://opentelemetry.io/docs/collector/) that provides a vendor-agnostic observability endpoint for traces, metrics, and logs. Any service in the same Docker network can send telemetry data to the collector using the standard OTLP protocol.
+
+### Architecture
+
+```
+┌────────────────────────┐     OTLP/gRPC (4317)     ┌──────────────────────┐
+│  BSSCI Service Center  │ ─────────────────────────►│                      │
+│  or external service   │     OTLP/HTTP (4318)      │  OpenTelemetry       │
+│                        │ ─────────────────────────►│  Collector           │
+└────────────────────────┘                           │                      │
+                                                     │  - Batch processor   │
+                                                     │  - Debug exporter    │
+                                                     │  - Prometheus export │
+                                                     └──────────┬───────────┘
+                                                                │ :8889
+                                                                ▼
+                                                     ┌──────────────────────┐
+                                                     │  Prometheus / Grafana│
+                                                     │  or other backend    │
+                                                     └──────────────────────┘
+```
+
+### Exposed Ports
+
+| Port | Protocol | Description |
+|------|----------|-------------|
+| 4317 | gRPC (OTLP) | OpenTelemetry OTLP gRPC receiver |
+| 4318 | HTTP (OTLP) | OpenTelemetry OTLP HTTP receiver |
+| 8889 | HTTP | Prometheus metrics scrape endpoint |
+
+### Quick Start
+
+The OpenTelemetry Collector is defined as an additional service in `docker-compose.yml` and starts automatically alongside the BSSCI Service Center:
+
+```bash
+docker-compose up -d
+```
+
+Verify that the collector is running:
+
+```bash
+docker-compose ps otel-collector
+docker-compose logs otel-collector
+```
+
+### Configuration
+
+The collector is configured via `otel-collector-config.yml` in the project root. The default configuration:
+
+- **Receivers**: OTLP gRPC (`:4317`) and OTLP HTTP (`:4318`)
+- **Processors**: Batch (1 s timeout, 1024 messages per batch)
+- **Exporters**: Debug (stdout) and Prometheus (`:8889`)
+- **Pipelines**: `traces`, `metrics`, and `logs` – all backed by the OTLP receivers
+
+To extend the configuration (e.g. add a Jaeger or Grafana Tempo exporter), edit `otel-collector-config.yml` and restart the container:
+
+```bash
+docker-compose restart otel-collector
+```
+
+**Example – adding a Jaeger exporter:**
+
+```yaml
+exporters:
+  jaeger:
+    endpoint: jaeger:14250
+    tls:
+      insecure: true
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [debug, jaeger]   # add jaeger here
+```
+
+### Environment Variables
+
+Add the following variables to your `.env` file to configure OTLP export from instrumented applications:
+
+```bash
+# OpenTelemetry Configuration
+OTEL_ENABLED=true                                    # Enable OTLP export
+OTEL_SERVICE_NAME=bssci-service-center               # Service name in traces/metrics
+OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318  # Collector base URL (no path suffix needed)
+OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf            # Serialization format
+```
+
+These variables are standard [OpenTelemetry SDK environment variables](https://opentelemetry.io/docs/specs/otel/configuration/sdk-environment-variables/) and are recognised automatically by any OpenTelemetry-instrumented application running in the same Docker network. The SDK automatically appends the correct signal-specific path (`/v1/traces`, `/v1/metrics`, `/v1/logs`) to the base URL, so you only need to provide the base URL without a path suffix.
+
+### Sending Metrics via Prometheus Scraping
+
+The collector exposes Prometheus-formatted metrics at `http://<host>:8889/metrics`. Add this endpoint as a scrape target in your `prometheus.yml`:
+
+```yaml
+scrape_configs:
+  - job_name: "bssci-otel"
+    static_configs:
+      - targets: ["<host>:8889"]
+```
+
+### Sending Custom Traces (Python Example)
+
+```python
+from opentelemetry import trace
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+import os
+
+provider = TracerProvider()
+exporter = OTLPSpanExporter(
+    endpoint=os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://otel-collector:4318")
+)
+provider.add_span_processor(BatchSpanProcessor(exporter))
+trace.set_tracer_provider(provider)
+
+tracer = trace.get_tracer("bssci-service-center")
+
+with tracer.start_as_current_span("process-sensor-message"):
+    # ... your processing logic here ...
+    pass
+```
+
+Required Python package: `opentelemetry-exporter-otlp-proto-http`
+
+```bash
+pip install opentelemetry-exporter-otlp-proto-http
+```
 
 ## Web Interface
 
