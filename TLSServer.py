@@ -9,6 +9,7 @@ from typing import Any, Dict, Set
 import bssci_config
 import messages
 from protocol import decode_messages, encode_message
+import telemetry
 
 logger = logging.getLogger(__name__)
 
@@ -322,6 +323,7 @@ class TLSServer:
                 writer.write(full_message)
                 await writer.drain()
                 self.traffic_metrics['attach_requests'] += 1
+                telemetry.record_attach(sensor['eui'].upper(), bs_eui)
 
                 # Track this attach request for correlation with response
                 self.pending_attach_requests[op_id] = {
@@ -435,6 +437,7 @@ class TLSServer:
             writer.write(full_message)
             await writer.drain()
             self.traffic_metrics['detach_requests'] += 1
+            telemetry.record_detach(sensor_eui.upper(), bs_eui)
 
             # Remove from registered sensors
             eui_key = sensor_eui.upper()
@@ -851,6 +854,7 @@ class TLSServer:
                             self.connected_base_stations[writer] = bs_eui
                             self.bs_op_ids[writer] = -1
                             connection_time = asyncio.get_event_loop().time() - connection_start_time
+                            telemetry.record_bs_connection(bs_eui, "connected")
 
                             logger.info(f"✅ BSSCI CONNECTION ESTABLISHED with base station {bs_eui}")
                             logger.info("   =====================================")
@@ -1205,6 +1209,7 @@ class TLSServer:
                                 logger.debug(f"   🔽 DEDUPLICATION: Filtered duplicate message for {eui} with lower SNR ({snr:.2f} dB <= {existing_message['snr']:.2f} dB)")
                                 self.deduplication_stats['duplicate_messages'] += 1
                                 self.traffic_metrics['messages_dropped'] += 1
+                                telemetry.record_duplicate(eui.upper(), bs_eui)
 
                                 # Send acknowledgment but don't queue for MQTT
                                 msg_pack = encode_message(
@@ -1716,6 +1721,7 @@ class TLSServer:
                 bs_eui = self.connected_base_stations.pop(writer)
                 logger.info(f"❌ Base station {bs_eui} disconnected")
                 logger.info(f"   Remaining connected base stations: {len(self.connected_base_stations)}")
+                telemetry.record_bs_connection(bs_eui, "disconnected")
             if writer in self.connecting_base_stations:
                 self.connecting_base_stations.pop(writer)
             self.bs_status_failures.pop(writer, None)
@@ -1782,6 +1788,15 @@ class TLSServer:
                     dup_msg = self.deduplication_stats['duplicate_messages']
                     pub_msg = self.deduplication_stats['published_messages']
                     dup_rate = (dup_msg / total_msg * 100) if total_msg > 0 else 0
+
+                    # OpenTelemetry: record uplink metrics
+                    telemetry.record_uplink(
+                        sensor_eui=eui.upper(),
+                        bs_eui=bs_eui,
+                        snr=snr,
+                        rssi=data_dict['rssi'],
+                        payload_bytes=len(payload_json),
+                    )
 
                     logger.info(f"📊 DEDUPLICATION STATISTICS:")
                     logger.info(f"   Total messages received: {total_msg}")
