@@ -14,12 +14,13 @@ The BSSCI Service Center is a comprehensive IoT device management system that pr
 5. [Sensor Management](#sensor-management)
 6. [Auto-Detach System](#auto-detach-system)
 7. [MQTT Integration](#mqtt-integration)
-8. [Web Interface](#web-interface)
-9. [API Reference](#api-reference)
-10. [Troubleshooting](#troubleshooting)
-11. [Advanced Features](#advanced-features)
-12. [OMS/Wireless M-Bus Support](#omswireless-m-bus-wmbus-meter-support)
-13. [User Authentication & Access Control](#user-authentication--role-based-access-control)
+8. [OpenTelemetry Integration](#opentelemetry-integration)
+9. [Web Interface](#web-interface)
+10. [API Reference](#api-reference)
+11. [Troubleshooting](#troubleshooting)
+12. [Advanced Features](#advanced-features)
+13. [OMS/Wireless M-Bus Support](#omswireless-m-bus-wmbus-meter-support)
+14. [User Authentication & Access Control](#user-authentication--role-based-access-control)
 
 ## System Architecture
 
@@ -571,6 +572,149 @@ OMS/wMBUS meters detected via the VM sub-channel are automatically published to 
 ```
 
 The payload follows the same structure as standard mioty sensor uplinks (`bs_eui`, `snr`, `rssi`, `data`, `mac_type`, `timestamp`) with an additional `oms` block containing the decoded wMBUS meter information.
+
+## OpenTelemetry Integration
+
+The BSSCI Service Center ships with:
+
+1. **Built-in SDK instrumentation** (`telemetry.py`) – activated by setting `OTEL_ENABLED=true`. The application then exports traces, metrics, and logs directly to the configured OTLP endpoint.
+2. **An optional OpenTelemetry Collector** sidecar (`docker-compose.yml`) that acts as the receiving endpoint, applies a batch processor, and re-exports to Prometheus or other backends.
+
+### Architecture
+
+```
+┌───────────────────────────────────────────────────────────────────────────┐
+│  BSSCI Service Center (telemetry.py – OTEL_ENABLED=true)                  │
+│                                                                            │
+│  TLSServer.py    ──► BS connect/disconnect spans & gauge                  │
+│                  ──► sensor attach/detach spans & counters                 │
+│                  ──► uplink SNR/RSSI histograms & counter                  │
+│                  ──► deduplication drop counter                            │
+│  mqtt_interface.py ► MQTT published/received counters, error counter       │
+│  main.py          ► service startup span                                   │
+│  Python logging   ► bridged to OTLP via LoggingHandler                    │
+└──────────────────────────────┬────────────────────────────────────────────┘
+                               │  OTLP HTTP (4318)
+                               ▼
+                    ┌──────────────────────┐
+                    │  OpenTelemetry       │
+                    │  Collector           │
+                    │  :4317 gRPC          │
+                    │  :4318 HTTP          │
+                    │  :8889 Prometheus    │
+                    └──────────┬───────────┘
+                               │ :8889
+                               ▼
+                    ┌──────────────────────┐
+                    │  Prometheus / Grafana│
+                    │  or other backend    │
+                    └──────────────────────┘
+```
+
+### Exposed Ports
+
+| Port | Protocol | Description |
+|------|----------|-------------|
+| 4317 | gRPC (OTLP) | OpenTelemetry OTLP gRPC receiver |
+| 4318 | HTTP (OTLP) | OpenTelemetry OTLP HTTP receiver |
+| 8889 | HTTP | Prometheus metrics scrape endpoint |
+
+### Quick Start
+
+Set `OTEL_ENABLED=true` in your `.env` file and start the stack:
+
+```bash
+docker-compose up -d
+```
+
+Verify that the collector is running and receiving data:
+
+```bash
+docker-compose ps otel-collector
+docker-compose logs otel-collector
+```
+
+### Instrumented Signals
+
+#### Metrics (counters & histograms)
+
+| Metric name | Type | Description |
+|-------------|------|-------------|
+| `bssci.sensor.uplinks_total` | Counter | Uplink messages forwarded to MQTT (after deduplication) |
+| `bssci.sensor.duplicates_total` | Counter | Uplink messages filtered by deduplication |
+| `bssci.sensor.attach_requests_total` | Counter | Sensor attach requests sent to base stations |
+| `bssci.sensor.detach_requests_total` | Counter | Sensor detach requests sent to base stations |
+| `bssci.mqtt.messages_published_total` | Counter | MQTT messages placed on the outgoing queue |
+| `bssci.mqtt.messages_received_total` | Counter | MQTT messages received from the broker |
+| `bssci.mqtt.connection_errors_total` | Counter | MQTT connection / reconnection errors |
+| `bssci.bs.connected_count` | UpDownCounter | Number of currently connected base stations |
+| `bssci.sensor.snr_db` | Histogram | Signal-to-Noise Ratio per uplink message (dB) |
+| `bssci.sensor.rssi_dbm` | Histogram | RSSI per uplink message (dBm) |
+
+All metrics carry `sensor_eui` and/or `bs_eui` attributes where applicable.
+
+#### Logs
+
+Python `logging` records (INFO and above) are bridged to the OTLP log pipeline via `opentelemetry-sdk`'s `LoggingHandler`. Every existing log statement in `TLSServer.py`, `mqtt_interface.py`, and `main.py` is automatically forwarded without code changes.
+
+### Configuration
+
+Set the following variables in your `.env` file:
+
+```bash
+# OpenTelemetry Configuration
+OTEL_ENABLED=true                                    # Enable OTLP export
+OTEL_SERVICE_NAME=bssci-service-center               # Service name in traces/metrics
+OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318  # Collector base URL (no trailing slash, no path)
+OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf            # Serialization format
+```
+
+`OTEL_EXPORTER_OTLP_ENDPOINT` is the **base URL only** (no trailing slash, no signal path). `telemetry.py` appends the correct signal-specific sub-path (`/v1/traces`, `/v1/metrics`, `/v1/logs`) before passing the URL to each exporter constructor. In a Docker deployment, `otel-collector` resolves to the collector container via the `bssci-network` Docker network.
+
+The collector itself is configured via `otel-collector-config.yml`. To extend it (e.g. add Jaeger or Grafana Tempo), edit the file and restart:
+
+```bash
+docker-compose restart otel-collector
+```
+
+**Example – adding a Jaeger exporter:**
+
+```yaml
+exporters:
+  jaeger:
+    endpoint: jaeger:14250
+    tls:
+      insecure: true
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [debug, jaeger]   # add jaeger here
+```
+
+### Sending Metrics via Prometheus Scraping
+
+The collector exposes Prometheus-formatted metrics at `http://<host>:8889/metrics`. Add this endpoint as a scrape target in your `prometheus.yml`:
+
+```yaml
+scrape_configs:
+  - job_name: "bssci-otel"
+    static_configs:
+      - targets: ["<host>:8889"]
+```
+
+### Python Dependencies
+
+The OpenTelemetry SDK packages are included in `requirements.txt` and installed automatically:
+
+```
+opentelemetry-sdk>=1.24.0
+opentelemetry-exporter-otlp-proto-http>=1.24.0
+```
+
+When `OTEL_ENABLED=false` (the default) all OTEL calls are routed through lightweight no-op stubs in `telemetry.py`, so the packages are used but produce no network traffic and no overhead.
 
 ## Web Interface
 

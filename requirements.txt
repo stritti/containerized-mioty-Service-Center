@@ -5,8 +5,10 @@ flask==3.0.3
 aiohttp==3.9.1
 paho-mqtt
 cryptography
-cryptography
 python-dotenv==1.0.0
 flake8
 black
 isort
+# OpenTelemetry SDK – activated when OTEL_ENABLED=true (see .env.example)
+opentelemetry-sdk>=1.24.0
+opentelemetry-exporter-otlp-proto-http>=1.24.0

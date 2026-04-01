@@ -36,6 +36,25 @@ services:
       retries: 3
       start_period: 40s
 
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.123.0
+    container_name: otel-collector
+    command: ["--config=/etc/otel/otel-collector-config.yml"]
+    volumes:
+      - ./otel-collector-config.yml:/etc/otel/otel-collector-config.yml:ro
+    ports:
+      - "4317:4317"   # OTLP gRPC receiver
+      - "4318:4318"   # OTLP HTTP receiver
+      - "8889:8889"   # Prometheus metrics exporter
+    networks:
+      - bssci-network
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
 networks:
   bssci-network:
     driver: bridge

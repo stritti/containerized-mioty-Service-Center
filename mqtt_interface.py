@@ -7,6 +7,7 @@ import paho.mqtt.client
 
 import bssci_config
 from bssci_config import MQTT_BROKER, MQTT_PORT, MQTT_USERNAME, MQTT_PASSWORD, BASE_TOPIC
+import telemetry
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +97,7 @@ class MQTTClient:
                 logger.error("=" * 60)
                 logger.error(f"🚨 Error: {e}")
                 logger.error(f"🔍 Error Type: {type(e).__name__}")
+                telemetry.record_mqtt_error()
 
                 logger.error("⏰ RETRY INFORMATION:")
                 logger.error(f"   Next attempt in: {retry_delay} seconds")
@@ -137,6 +139,7 @@ class MQTTClient:
                 message_count += 1
                 logger.info(f"🎉 MQTT INCOMING MESSAGE #{message_count} RECEIVED!")
                 logger.info(f"📍 Topic: {message.topic}")
+                telemetry.record_mqtt_received(str(message.topic))
 
                 try:
                     # Extract EUI like the working version
@@ -229,6 +232,7 @@ class MQTTClient:
                     # Use the working simple publish pattern
                     print(f"{topic}:\n\t{msg['payload']}")  # Keep the original print
                     await client.publish(topic, msg["payload"])
+                    telemetry.record_mqtt_published(topic)
 
                     logger.info("✅ MQTT MESSAGE PUBLISHED SUCCESSFULLY!")
 

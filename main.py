@@ -5,6 +5,7 @@ import bssci_config
 from bssci_config import SENSOR_CONFIG_FILE, LISTEN_HOST, LISTEN_PORT, MQTT_BROKER, MQTT_PORT
 from mqtt_interface import MQTTClient
 from TLSServer import TLSServer
+import telemetry
 
 # Configure logging with timezone
 import time
@@ -48,6 +49,9 @@ async def main() -> None:
     global tls_server_instance
     mqtt_out_queue: asyncio.Queue[dict[str, str]] = asyncio.Queue()
     mqtt_in_queue: asyncio.Queue[dict[str, str]] = asyncio.Queue()
+
+    # Initialise OpenTelemetry (no-op when OTEL_ENABLED != true)
+    telemetry.setup_telemetry()
 
     logger.info("Initializing BSSCI Service Center...")
     logger.info(f"Config: TLS Port {LISTEN_PORT}, MQTT Broker {MQTT_BROKER}:{MQTT_PORT}")
