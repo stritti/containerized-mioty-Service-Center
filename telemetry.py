@@ -141,8 +141,12 @@ def setup_telemetry() -> Dict[str, Any]:
         _setup_metrics()
         _setup_log_bridge()
         _register_instruments()
-        logger.info("✅ OpenTelemetry initialised (endpoint: %s)",
-                    os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://otel-collector:4318"))
+        logger.info(
+            "✅ OpenTelemetry initialized – traces: %s, metrics: %s, logs: %s",
+            _otlp_endpoint("v1/traces"),
+            _otlp_endpoint("v1/metrics"),
+            _otlp_endpoint("v1/logs"),
+        )
     except ImportError as exc:
         logger.warning(
             "⚠️  OpenTelemetry packages not installed – falling back to no-op stubs. "
@@ -164,6 +168,28 @@ def setup_telemetry() -> Dict[str, Any]:
 # Internal helpers
 # ---------------------------------------------------------------------------
 
+def _otlp_endpoint(signal_path: str) -> str:
+    """Build the full OTLP HTTP endpoint URL for a specific signal.
+
+    ``OTEL_EXPORTER_OTLP_ENDPOINT`` is the *base* URL (no trailing slash, no
+    path suffix).  When ``endpoint=`` is passed *directly* to an OTLP exporter
+    constructor the SDK does **not** append the signal-specific sub-path – that
+    auto-appending only occurs when the exporter reads the env-var itself.
+    This helper therefore appends the correct path so that the collector
+    receives requests at the right endpoint in every deployment, including
+    Docker where the service is reachable as ``otel-collector``.
+
+    Examples
+    --------
+    base = "http://otel-collector:4318"  →  "http://otel-collector:4318/v1/traces"
+    base = "http://otel-collector:4318/" →  "http://otel-collector:4318/v1/traces"
+    """
+    base = os.getenv(
+        "OTEL_EXPORTER_OTLP_ENDPOINT", "http://otel-collector:4318"
+    ).rstrip("/")
+    return f"{base}/{signal_path.lstrip('/')}"
+
+
 def _setup_tracing() -> None:
     global _tracer
     from opentelemetry import trace
@@ -178,7 +204,7 @@ def _setup_tracing() -> None:
     })
     provider = TracerProvider(resource=resource)
     exporter = OTLPSpanExporter(
-        endpoint=os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://otel-collector:4318")
+        endpoint=_otlp_endpoint("v1/traces")
     )
     provider.add_span_processor(BatchSpanProcessor(exporter))
     trace.set_tracer_provider(provider)
@@ -197,7 +223,7 @@ def _setup_metrics() -> None:
         "service.name": os.getenv("OTEL_SERVICE_NAME", "bssci-service-center"),
     })
     exporter = OTLPMetricExporter(
-        endpoint=os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://otel-collector:4318")
+        endpoint=_otlp_endpoint("v1/metrics")
     )
     reader = PeriodicExportingMetricReader(exporter, export_interval_millis=15_000)
     provider = MeterProvider(resource=resource, metric_readers=[reader])
@@ -218,7 +244,7 @@ def _setup_log_bridge() -> None:
         })
         log_provider = LoggerProvider(resource=resource)
         log_exporter = OTLPLogExporter(
-            endpoint=os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://otel-collector:4318")
+            endpoint=_otlp_endpoint("v1/logs")
         )
         log_provider.add_log_record_processor(BatchLogRecordProcessor(log_exporter))
         handler = LoggingHandler(level=logging.INFO, logger_provider=log_provider)

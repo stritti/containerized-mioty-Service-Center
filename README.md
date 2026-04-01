@@ -665,11 +665,11 @@ Set the following variables in your `.env` file:
 # OpenTelemetry Configuration
 OTEL_ENABLED=true                                    # Enable OTLP export
 OTEL_SERVICE_NAME=bssci-service-center               # Service name in traces/metrics
-OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318  # Collector base URL (no path suffix needed)
+OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318  # Collector base URL (no trailing slash, no path)
 OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf            # Serialization format
 ```
 
-The SDK automatically appends the correct signal-specific path (`/v1/traces`, `/v1/metrics`, `/v1/logs`) to the base URL, so you only need to provide the base URL without a path suffix.
+`OTEL_EXPORTER_OTLP_ENDPOINT` is the **base URL only** (no trailing slash, no signal path). `telemetry.py` appends the correct signal-specific sub-path (`/v1/traces`, `/v1/metrics`, `/v1/logs`) before passing the URL to each exporter constructor. In a Docker deployment, `otel-collector` resolves to the collector container via the `bssci-network` Docker network.
 
 The collector itself is configured via `otel-collector-config.yml`. To extend it (e.g. add Jaeger or Grafana Tempo), edit the file and restart:
 
