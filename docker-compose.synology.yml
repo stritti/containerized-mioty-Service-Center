@@ -10,7 +10,7 @@ services:
       - "5056:5000"    # Web UI port
     volumes:
       # Consolidated volume structure (Synology-compatible)
-      - ./certs:/app/certs:ro             # TLS certificates (read-only)
+      - ./certs:/app/certs:rw             # TLS certificates (writable for auto-generation)
       - ./config:/app/config:rw           # Configuration files
       - ./data:/app/data:rw               # Application data
       - ./logs:/app/logs:rw               # Log files
