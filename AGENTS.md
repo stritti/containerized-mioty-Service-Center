@@ -60,6 +60,16 @@ Dev dependencies in requirements.txt: flake8, black, isort
 - Sensor config: `endpoints.json`
 - Web auth: `users.json`
 
+## Docker Release Pipeline
+
+Push to `release` branch triggers `.github/workflows/release.yml`:
+1. Reads `VERSION` file, checks if tag already exists
+2. Generates categorized release notes from conventional commits
+3. Builds + pushes Docker image to GHCR (`v{VERSION}`, `latest`, `stable`)
+4. Creates git tag and GitHub Release
+
+Manual: `gh workflow run release.yml --ref release -f version=1.676`
+
 ## Documentation
 
 ```bash

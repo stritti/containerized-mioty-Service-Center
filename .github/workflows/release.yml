@@ -1,0 +1,217 @@
+name: Docker Release
+
+on:
+  push:
+    branches: [ "release" ]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Override version (leave empty to use VERSION file)"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    # Skip if this is a PR or if triggered on other branches
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/release')
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Read VERSION
+        id: version
+        run: |
+          if [ -n "${{ inputs.version }}" ]; then
+            echo "version=${{ inputs.version }}" >> $GITHUB_OUTPUT
+          else
+            echo "version=$(cat VERSION)" >> $GITHUB_OUTPUT
+          fi
+          echo "RELEASE_TAG=v$(cat VERSION)" >> $GITHUB_OUTPUT
+
+      - name: Check if release tag already exists
+        id: check
+        run: |
+          TAG="v${{ steps.version.outputs.version }}"
+          if git tag -l "$TAG" | grep -q .; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+            echo "message=Tag $TAG already exists — skipping release" >> $GITHUB_OUTPUT
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+            echo "message=Creating release $TAG" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Generate release notes from conventional commits
+        if: steps.check.outputs.exists == 'false'
+        id: notes
+        run: |
+          LATEST_TAG=$(git tag -l 'v*' --sort=-version:refname | head -n 1)
+
+          if [ -z "$LATEST_TAG" ]; then
+            COMMITS=$(git log --oneline --format="%s" --no-merges HEAD 2>/dev/null || echo "")
+          else
+            COMMITS=$(git log "$LATEST_TAG"..HEAD --oneline --format="%s" --no-merges 2>/dev/null || echo "")
+          fi
+
+          # If no commits found between tags, fall back to recent commits
+          if [ -z "$COMMITS" ]; then
+            COMMITS=$(git log --oneline --format="%s" --no-merges -20 HEAD 2>/dev/null || echo "")
+          fi
+
+          # Categorize commits
+          FEATURES=""
+          FIXES=""
+          CHORES=""
+          DOCS=""
+          REFACTOR=""
+          DEPS=""
+          OTHER=""
+
+          while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            case "$line" in
+              "feat:"*) 
+                msg="${line#feat: }"
+                FEATURES="${FEATURES}- ${msg}"$'\n'
+                ;;
+              "fix:"*)
+                msg="${line#fix: }"
+                FIXES="${FIXES}- ${msg}"$'\n'
+                ;;
+              "chore:"*)
+                msg="${line#chore: }"
+                CHORES="${CHORES}- ${msg}"$'\n'
+                ;;
+              "docs:"*)
+                msg="${line#docs: }"
+                DOCS="${DOCS}- ${msg}"$'\n'
+                ;;
+              "refactor:"*)
+                msg="${line#refactor: }"
+                REFACTOR="${REFACTOR}- ${msg}"$'\n'
+                ;;
+              "Bump"*)
+                DEPS="${DEPS}- ${line}"$'\n'
+                ;;
+              *)
+                OTHER="${OTHER}- ${line}"$'\n'
+                ;;
+            esac
+          done <<< "$COMMITS"
+
+          NOTES="## Release v${{ steps.version.outputs.version }}"
+          NOTES="${NOTES}"$'\n'""
+          if [ -n "$FEATURES" ]; then
+            NOTES="${NOTES}"$'\n'"## Features"$'\n'"${FEATURES}"
+          fi
+          if [ -n "$FIXES" ]; then
+            NOTES="${NOTES}"$'\n'"## Bug Fixes"$'\n'"${FIXES}"
+          fi
+          if [ -n "$REFACTOR" ]; then
+            NOTES="${NOTES}"$'\n'"## Refactoring"$'\n'"${REFACTOR}"
+          fi
+          if [ -n "$DOCS" ]; then
+            NOTES="${NOTES}"$'\n'"## Documentation"$'\n'"${DOCS}"
+          fi
+          if [ -n "$DEPS" ]; then
+            NOTES="${NOTES}"$'\n'"## Dependencies"$'\n'"${DEPS}"
+          fi
+          if [ -n "$CHORES" ]; then
+            NOTES="${NOTES}"$'\n'"## Chores"$'\n'"${CHORES}"
+          fi
+          if [ -n "$OTHER" ]; then
+            NOTES="${NOTES}"$'\n'"## Other Changes"$'\n'"${OTHER}"
+          fi
+          if [ -z "$FEATURES$FIXES$REFACTOR$DOCS$DEPS$CHORES$OTHER" ]; then
+            NOTES="${NOTES}"$'\n'"No significant changes."
+          fi
+
+          # Write to file for the GitHub Release action
+          echo "$NOTES" > release_notes.md
+
+          # Also set as output for debugging
+          {
+            echo 'NOTES<<EOF'
+            echo "$NOTES"
+            echo 'EOF'
+          } >> $GITHUB_OUTPUT
+
+      - name: Set up Docker Buildx
+        if: steps.check.outputs.exists == 'false'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        if: steps.check.outputs.exists == 'false'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract Docker metadata
+        if: steps.check.outputs.exists == 'false'
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=v${{ steps.version.outputs.version }},priority=100
+            type=raw,value=latest,priority=90
+            type=raw,value=stable,priority=80
+            type=raw,value=${{ steps.version.outputs.version }},priority=70
+          labels: |
+            org.opencontainers.image.title=BSSCI Service Center
+            org.opencontainers.image.description=IoT device management system for mioty sensors
+            org.opencontainers.image.version=v${{ steps.version.outputs.version }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+
+      - name: Build and push Docker image
+        if: steps.check.outputs.exists == 'false'
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+      - name: Create Git Tag
+        if: steps.check.outputs.exists == 'false'
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git tag -a "v${{ steps.version.outputs.version }}" \
+            -m "Release v${{ steps.version.outputs.version }}"
+          git push origin "v${{ steps.version.outputs.version }}"
+
+      - name: Create GitHub Release
+        if: steps.check.outputs.exists == 'false'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.version }}
+          name: Release v${{ steps.version.outputs.version }}
+          body_path: release_notes.md
+          target_commitish: ${{ github.sha }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Summary
+        run: |
+          if [ "${{ steps.check.outputs.exists }}" == "true" ]; then
+            echo "### Skipped: ${{ steps.check.outputs.message }}" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "### Published: v${{ steps.version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "**Docker image:** \`ghcr.io/${{ github.repository }}:v${{ steps.version.outputs.version }}\`" >> $GITHUB_STEP_SUMMARY
+            echo "**Tags:** \`v${{ steps.version.outputs.version }}\`, \`latest\`, \`stable\`, \`${{ steps.version.outputs.version }}\`" >> $GITHUB_STEP_SUMMARY
+          fi
